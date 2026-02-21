@@ -3,18 +3,22 @@ pipeline.py
 -----------
 Core vibe-based song recommendation pipeline extracted from Colab notebooks.
 
+API keys are loaded automatically from a .env file in the working directory,
+or from environment variables already set in the shell/deployment platform.
+
+Required .env variables:
+    GEMINI_API_KEY
+    SPOTIFY_CLIENT_ID
+    SPOTIFY_CLIENT_SECRET
+
 Usage:
     from pipeline import load_resources, recommend, recommend_from_image
 
     # Call once at startup (slow - loads embeddings + model)
     load_resources(
         embeddings_path="final_embeddings_by_popularity.npy",
-        metadata_dir="top_500000_by_views_parquet/",   # folder of .parquet chunks
-        # OR pass a single pre-built metadata parquet:
-        # metadata_path="final_meta.parquet",
-        gemini_api_key="your-gemini-key",
-        spotify_client_id="your-spotify-client-id",
-        spotify_client_secret="your-spotify-client-secret",
+        metadata_dir="top_500000_by_views_parquet/",
+        # OR: metadata_path="final_meta.parquet",
     )
 
     # Text-based recommendation
@@ -33,15 +37,21 @@ Usage:
 import os
 import glob
 import json
+import re
 
 import numpy as np
 import pandas as pd
+import faiss
 import spotipy
+from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyClientCredentials
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from google import genai
 from google.genai import types
+
+# Load .env file automatically on module import
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Module-level state (populated by load_resources)
@@ -61,28 +71,9 @@ def load_resources(
     embeddings_path: str,
     metadata_dir: str = None,
     metadata_path: str = None,
-    gemini_api_key: str = None,
-    spotify_client_id: str = None,
-    spotify_client_secret: str = None,
     min_lyric_length: int = 100,
     device: str = "cpu",
 ):
-    """
-    Load all heavy resources into module-level globals.
-    Call this ONCE before calling recommend().
-
-    Parameters
-    ----------
-    embeddings_path        : path to final_embeddings_by_popularity.npy
-    metadata_dir           : path to folder containing .parquet chunk files
-    metadata_path          : path to a single pre-built metadata .parquet file
-                             (use this OR metadata_dir, not both)
-    gemini_api_key         : Gemini API key. Falls back to GEMINI_API_KEY env var.
-    spotify_client_id      : Spotify app client ID (from developer.spotify.com)
-    spotify_client_secret  : Spotify app client secret
-    min_lyric_length       : minimum character count to keep a song row (default 100)
-    device                 : 'cpu' or 'cuda'
-    """
     global _embed_model, _final_matrix, _full_songs_metadata, _client, _spotify
 
     # Guard against double-loading
@@ -90,18 +81,29 @@ def load_resources(
         print("Resources already loaded, skipping.")
         return
 
+    # Use local variables until everything succeeds,
+    # then assign to globals all at once at the end
+    embed_model         = None
+    final_matrix        = None
+    full_songs_metadata = None
+    client              = None
+    spotify             = None
+
     # --- Gemini client ---
-    api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
-    if api_key:
-        os.environ["GEMINI_API_KEY"] = api_key
-    _client = genai.Client()
+    gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not gemini_api_key:
+        raise EnvironmentError(
+            "GEMINI_API_KEY not found. "
+            "Add it to your .env file or set it as an environment variable."
+        )
+    client = genai.Client()
     print("✅ Gemini client ready.")
 
     # --- Spotify client ---
-    sp_id     = spotify_client_id     or os.environ.get("SPOTIFY_CLIENT_ID", "")
-    sp_secret = spotify_client_secret or os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+    sp_id     = os.environ.get("SPOTIFY_CLIENT_ID", "")
+    sp_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
     if sp_id and sp_secret:
-        _spotify = spotipy.Spotify(
+        spotify = spotipy.Spotify(
             auth_manager=SpotifyClientCredentials(
                 client_id=sp_id,
                 client_secret=sp_secret,
@@ -109,59 +111,69 @@ def load_resources(
         )
         print("✅ Spotify client ready.")
     else:
-        print("⚠️  Spotify credentials not provided — album_art and spotify_url will be None.")
+        print(
+            "⚠️  SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET not found in .env — "
+            "album_art and spotify_url will be None."
+        )
 
     # --- Sentence transformer ---
     print(f"Loading sentence transformer on {device.upper()}...")
-    _embed_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+    embed_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
     print("✅ Sentence transformer loaded.")
 
     # --- Embeddings matrix ---
     print(f"Loading embeddings from {embeddings_path}...")
-    _final_matrix = np.load(embeddings_path).astype("float32")
-    print(f"✅ Embeddings loaded: {_final_matrix.shape}")
+    final_matrix = np.load(embeddings_path).astype("float32")
+    print(f"✅ Embeddings loaded: {final_matrix.shape}")
 
     # --- Song metadata ---
     if metadata_path:
         print(f"Loading metadata from {metadata_path}...")
-        _full_songs_metadata = pd.read_parquet(metadata_path)
+        full_songs_metadata = pd.read_parquet(metadata_path)
     elif metadata_dir:
         parquet_files = sorted(glob.glob(f"{metadata_dir}/*.parquet"))
         print(f"Reconstructing metadata from {len(parquet_files)} parquet chunks...")
         chunks = [pd.read_parquet(f) for f in parquet_files]
-        _full_songs_metadata = pd.concat(chunks, ignore_index=True)
+        full_songs_metadata = pd.concat(chunks, ignore_index=True)
     else:
         raise ValueError("Provide either metadata_path or metadata_dir.")
 
     # --- Sanity check ---
-    if len(_full_songs_metadata) != _final_matrix.shape[0]:
+    if len(full_songs_metadata) != final_matrix.shape[0]:
         raise ValueError(
-            f"Row mismatch: {len(_full_songs_metadata)} metadata rows "
-            f"vs {_final_matrix.shape[0]} embedding rows."
+            f"Row mismatch: {len(full_songs_metadata)} metadata rows "
+            f"vs {final_matrix.shape[0]} embedding rows."
         )
 
     # --- Filter short lyrics ---
-    if "lyrics_clean" in _full_songs_metadata.columns:
-        mask = _full_songs_metadata["lyrics_clean"].str.len() >= min_lyric_length
-        _full_songs_metadata = _full_songs_metadata[mask].reset_index(drop=True)
-        _final_matrix = _final_matrix[mask]
+    if "lyrics_clean" in full_songs_metadata.columns:
+        mask = full_songs_metadata["lyrics_clean"].str.len() >= min_lyric_length
+        full_songs_metadata = full_songs_metadata[mask].reset_index(drop=True)
+        final_matrix = final_matrix[mask]
 
     # --- Clean artist names ---
-    if "artist" in _full_songs_metadata.columns:
-        _full_songs_metadata["artist"] = _full_songs_metadata["artist"].apply(_clean_artist)
-        _full_songs_metadata["artist"] = (
-            _full_songs_metadata["artist"]
+    if "artist" in full_songs_metadata.columns:
+        full_songs_metadata["artist"] = full_songs_metadata["artist"].apply(_clean_artist)
+        full_songs_metadata["artist"] = (
+            full_songs_metadata["artist"]
             .str.split(r",|&", regex=True)
             .str[0]
             .str.strip()
         )
+
+    # --- Everything succeeded — now assign to globals ---
+    _embed_model         = embed_model
+    _final_matrix        = final_matrix
+    _full_songs_metadata = full_songs_metadata
+    _client              = client
+    _spotify             = spotify
 
     print(
         f"✅ All resources loaded. "
         f"{len(_full_songs_metadata):,} songs | "
         f"{_final_matrix.shape[1]}-dim embeddings."
     )
-
+    
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -183,6 +195,12 @@ def _expand_query(query: str, extra_phrasings: list = None) -> np.ndarray:
     expansions = [query] + (extra_phrasings or [])
     vecs = _embed_model.encode(expansions, convert_to_numpy=True).astype("float32")
     return vecs.mean(axis=0, keepdims=True)
+
+
+def _is_close_match(a: str, b: str) -> bool:
+    """Check if two strings are roughly the same after lowercasing and stripping punctuation."""
+    clean = lambda s: re.sub(r"[^\w\s]", "", s.lower()).strip()
+    return clean(a) in clean(b) or clean(b) in clean(a)
 
 
 def _run_search(
@@ -284,14 +302,26 @@ def _run_search(
 # ---------------------------------------------------------------------------
 
 def get_spotify_data(title: str, artist: str) -> dict:
+    """
+    Look up a song on Spotify and return album art URL and Spotify track link.
+    Validates that the returned track actually matches the search to avoid
+    returning links for the wrong song.
+
+    Returns None values gracefully if no match is found or Spotify is unavailable.
+
+    Parameters
+    ----------
+    title  : song title
+    artist : artist name
+
+    Returns
+    -------
+    dict with keys:
+        album_art    (str | None)  — URL to highest-res album cover image
+        spotify_url  (str | None)  — direct link to track on Spotify
+    """
     if _spotify is None:
         return {"album_art": None, "spotify_url": None}
-
-    def _is_close_match(a: str, b: str) -> bool:
-        """Check if two strings are roughly the same after lowercasing and stripping punctuation."""
-        import re
-        clean = lambda s: re.sub(r"[^\w\s]", "", s.lower()).strip()
-        return clean(a) in clean(b) or clean(b) in clean(a)
 
     try:
         # Strict search first
@@ -308,17 +338,19 @@ def get_spotify_data(title: str, artist: str) -> dict:
         if not tracks:
             return {"album_art": None, "spotify_url": None}
 
-        track        = tracks[0]
+        track           = tracks[0]
         returned_title  = track["name"]
         returned_artist = track["artists"][0]["name"]
 
-        # Validate the result actually matches what we asked for
+        # Validate the result actually matches what we searched for
         title_match  = _is_close_match(title, returned_title)
         artist_match = _is_close_match(artist, returned_artist)
 
         if not title_match or not artist_match:
-            print(f"⚠️  Spotify mismatch for '{title}' by '{artist}' — "
-                  f"got '{returned_title}' by '{returned_artist}'. Skipping.")
+            print(
+                f"⚠️  Spotify mismatch for '{title}' by '{artist}' — "
+                f"got '{returned_title}' by '{returned_artist}'. Skipping."
+            )
             return {"album_art": None, "spotify_url": None}
 
         images = track["album"]["images"]
