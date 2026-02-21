@@ -5,6 +5,7 @@ __pycache__/
 .streamlit/secrets.toml
 
 # Data / artifacts (choose whether to commit these)
+data
 data/raw/
 data/processed/
 artifacts/
