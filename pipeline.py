@@ -74,20 +74,30 @@ def load_resources(
     min_lyric_length: int = 100,
     device: str = "cpu",
 ):
+    """
+    Load all heavy resources into module-level globals.
+    Call this ONCE before calling recommend().
+
+    API keys are read automatically from .env / environment variables:
+        GEMINI_API_KEY
+        SPOTIFY_CLIENT_ID
+        SPOTIFY_CLIENT_SECRET
+
+    Parameters
+    ----------
+    embeddings_path  : path to final_embeddings_by_popularity.npy
+    metadata_dir     : path to folder containing .parquet chunk files
+    metadata_path    : path to a single pre-built metadata .parquet file
+                       (use this OR metadata_dir, not both)
+    min_lyric_length : minimum character count to keep a song row (default 100)
+    device           : 'cpu' or 'cuda'
+    """
     global _embed_model, _final_matrix, _full_songs_metadata, _client, _spotify
 
     # Guard against double-loading
     if _embed_model is not None:
         print("Resources already loaded, skipping.")
         return
-
-    # Use local variables until everything succeeds,
-    # then assign to globals all at once at the end
-    embed_model         = None
-    final_matrix        = None
-    full_songs_metadata = None
-    client              = None
-    spotify             = None
 
     # --- Gemini client ---
     gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -96,14 +106,14 @@ def load_resources(
             "GEMINI_API_KEY not found. "
             "Add it to your .env file or set it as an environment variable."
         )
-    client = genai.Client()
+    _client = genai.Client()
     print("✅ Gemini client ready.")
 
     # --- Spotify client ---
     sp_id     = os.environ.get("SPOTIFY_CLIENT_ID", "")
     sp_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
     if sp_id and sp_secret:
-        spotify = spotipy.Spotify(
+        _spotify = spotipy.Spotify(
             auth_manager=SpotifyClientCredentials(
                 client_id=sp_id,
                 client_secret=sp_secret,
@@ -118,62 +128,55 @@ def load_resources(
 
     # --- Sentence transformer ---
     print(f"Loading sentence transformer on {device.upper()}...")
-    embed_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+    _embed_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
     print("✅ Sentence transformer loaded.")
 
     # --- Embeddings matrix ---
     print(f"Loading embeddings from {embeddings_path}...")
-    final_matrix = np.load(embeddings_path).astype("float32")
-    print(f"✅ Embeddings loaded: {final_matrix.shape}")
+    _final_matrix = np.load(embeddings_path).astype("float32")
+    print(f"✅ Embeddings loaded: {_final_matrix.shape}")
 
     # --- Song metadata ---
     if metadata_path:
         print(f"Loading metadata from {metadata_path}...")
-        full_songs_metadata = pd.read_parquet(metadata_path)
+        _full_songs_metadata = pd.read_parquet(metadata_path)
     elif metadata_dir:
         parquet_files = sorted(glob.glob(f"{metadata_dir}/*.parquet"))
         print(f"Reconstructing metadata from {len(parquet_files)} parquet chunks...")
         chunks = [pd.read_parquet(f) for f in parquet_files]
-        full_songs_metadata = pd.concat(chunks, ignore_index=True)
+        _full_songs_metadata = pd.concat(chunks, ignore_index=True)
     else:
         raise ValueError("Provide either metadata_path or metadata_dir.")
 
     # --- Sanity check ---
-    if len(full_songs_metadata) != final_matrix.shape[0]:
+    if len(_full_songs_metadata) != _final_matrix.shape[0]:
         raise ValueError(
-            f"Row mismatch: {len(full_songs_metadata)} metadata rows "
-            f"vs {final_matrix.shape[0]} embedding rows."
+            f"Row mismatch: {len(_full_songs_metadata)} metadata rows "
+            f"vs {_final_matrix.shape[0]} embedding rows."
         )
 
     # --- Filter short lyrics ---
-    if "lyrics_clean" in full_songs_metadata.columns:
-        mask = full_songs_metadata["lyrics_clean"].str.len() >= min_lyric_length
-        full_songs_metadata = full_songs_metadata[mask].reset_index(drop=True)
-        final_matrix = final_matrix[mask]
+    if "lyrics_clean" in _full_songs_metadata.columns:
+        mask = _full_songs_metadata["lyrics_clean"].str.len() >= min_lyric_length
+        _full_songs_metadata = _full_songs_metadata[mask].reset_index(drop=True)
+        _final_matrix = _final_matrix[mask]
 
     # --- Clean artist names ---
-    if "artist" in full_songs_metadata.columns:
-        full_songs_metadata["artist"] = full_songs_metadata["artist"].apply(_clean_artist)
-        full_songs_metadata["artist"] = (
-            full_songs_metadata["artist"]
+    if "artist" in _full_songs_metadata.columns:
+        _full_songs_metadata["artist"] = _full_songs_metadata["artist"].apply(_clean_artist)
+        _full_songs_metadata["artist"] = (
+            _full_songs_metadata["artist"]
             .str.split(r",|&", regex=True)
             .str[0]
             .str.strip()
         )
-
-    # --- Everything succeeded — now assign to globals ---
-    _embed_model         = embed_model
-    _final_matrix        = final_matrix
-    _full_songs_metadata = full_songs_metadata
-    _client              = client
-    _spotify             = spotify
 
     print(
         f"✅ All resources loaded. "
         f"{len(_full_songs_metadata):,} songs | "
         f"{_final_matrix.shape[1]}-dim embeddings."
     )
-    
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -199,8 +202,9 @@ def _expand_query(query: str, extra_phrasings: list = None) -> np.ndarray:
 
 def _is_close_match(a: str, b: str) -> bool:
     """Check if two strings are roughly the same after lowercasing and stripping punctuation."""
-    clean = lambda s: re.sub(r"[^\w\s]", "", s.lower()).strip()
-    return clean(a) in clean(b) or clean(b) in clean(a)
+    a_clean = re.sub(r"[^\w\s]", "", a.lower()).strip()
+    b_clean = re.sub(r"[^\w\s]", "", b.lower()).strip()
+    return a_clean in b_clean or b_clean in a_clean
 
 
 def _run_search(
@@ -217,6 +221,9 @@ def _run_search(
     Shared search logic used by both recommend() and recommend_from_image().
     Takes an already-enriched query dict and returns ranked results with
     Spotify album art and links attached.
+
+    Spotify lookups are batched after candidate selection to avoid making
+    API calls for songs that get filtered out by diversity rules.
     """
     query_text      = enriched["rewritten_prompt"]
     extra_phrasings = enriched.get("keywords", []) + enriched.get("moods", [])
@@ -231,13 +238,21 @@ def _run_search(
     floor_mask = semantic_scores >= min_semantic
 
     # --- Popularity score (log-normalised views) ---
-    views      = pd.to_numeric(_full_songs_metadata.get("views", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    if "views" in _full_songs_metadata.columns:
+        views = pd.to_numeric(_full_songs_metadata["views"], errors="coerce").fillna(0)
+    else:
+        views = pd.Series(np.zeros(len(_full_songs_metadata)))
+
     popularity = np.log10(views + 1)
     pop_min, pop_max = popularity.min(), popularity.max()
     popularity = (popularity - pop_min) / (pop_max - pop_min + 1e-9)
 
     # --- Recency score ---
-    years   = pd.to_numeric(_full_songs_metadata.get("year", pd.Series(dtype=float)), errors="coerce")
+    if "year" in _full_songs_metadata.columns:
+        years = pd.to_numeric(_full_songs_metadata["year"], errors="coerce")
+    else:
+        years = pd.Series(np.full(len(_full_songs_metadata), np.nan))
+
     yr_min, yr_max = years.min(), years.max()
     recency = (years - yr_min) / (yr_max - yr_min + 1e-9)
     recency = recency.fillna(0.5)
@@ -250,7 +265,7 @@ def _run_search(
     )
     final_scores[~floor_mask] = 0.0
 
-    # --- Diversity filtering ---
+    # --- Diversity filtering (no Spotify calls yet) ---
     candidate_indices  = final_scores.argsort()[-(k * candidate_pool):][::-1]
     results            = []
     seen_titles        = set()
@@ -272,19 +287,14 @@ def _run_search(
         seen_titles.add(clean_title)
         seen_artist_counts[artist] = seen_artist_counts.get(artist, 0) + 1
 
-        # --- Spotify data ---
-        spotify_data = get_spotify_data(
-            title=str(row.get("title", "")),
-            artist=str(row.get("artist", "")),
-        )
-
+        # Append result without Spotify data yet
         results.append({
             "title":          str(row.get("title", "")),
             "artist":         str(row.get("artist", "")),
             "year":           int(years.iloc[i]) if not pd.isna(years.iloc[i]) else None,
             "views":          int(views.iloc[i]) if views.iloc[i] > 0 else None,
-            "spotify_url":    spotify_data["spotify_url"],
-            "album_art":      spotify_data["album_art"],
+            "spotify_url":    None,
+            "album_art":      None,
             "lyric_snippet":  str(row.get("lyrics_clean", ""))[:150],
             "final_score":    float(final_scores[i]),
             "semantic_score": float(semantic_scores[i]),
@@ -293,6 +303,13 @@ def _run_search(
 
         if len(results) >= k:
             break
+
+    # --- Batch Spotify lookups after candidate selection ---
+    # Only call Spotify for the final k results, not discarded candidates
+    for r in results:
+        spotify_data   = get_spotify_data(r["title"], r["artist"])
+        r["spotify_url"] = spotify_data["spotify_url"]
+        r["album_art"]   = spotify_data["album_art"]
 
     return results
 
