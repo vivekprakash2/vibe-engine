@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.streamlit/secrets.toml
+
+# Data / artifacts (choose whether to commit these)
+data/raw/
+data/processed/
+artifacts/
+
+.DS_Store
