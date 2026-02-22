@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-dotenv
+spotipy
+sentence-transformers
+python-multipart
+scikit-learn
+google-genai
+numpy
+pandas
+pyarrow
