@@ -294,6 +294,7 @@ def _run_search(
             "views":          int(views.iloc[i]) if views.iloc[i] > 0 else None,
             "spotify_url":    None,
             "album_art":      None,
+            "explanation":    None,
             "lyric_snippet":  str(row.get("lyrics_clean", ""))[:150],
             "final_score":    float(final_scores[i]),
             "semantic_score": float(semantic_scores[i]),
@@ -309,6 +310,16 @@ def _run_search(
         spotify_data   = get_spotify_data(r["title"], r["artist"])
         r["spotify_url"] = spotify_data["spotify_url"]
         r["album_art"]   = spotify_data["album_art"]
+        
+        
+    # --- Batch explanation generation (single Gemini call) ---
+    explanations = _generate_explanations_batch(
+        prompt=enriched["rewritten_prompt"],
+        results=results,
+        moods=enriched.get("moods", []),
+    )
+    for r, explanation in zip(results, explanations):
+        r["explanation"] = explanation
 
     return results
 
@@ -598,3 +609,61 @@ def recommend_from_image(
         min_semantic=min_semantic,
         candidate_pool=candidate_pool,
     )
+    
+
+def _generate_explanations_batch(
+    prompt: str,
+    results: list[dict],
+    moods: list[str],
+    model: str = "gemini-2.5-flash",
+) -> list[str]:
+    """
+    Generate one-sentence explanations for all recommended songs in a single
+    Gemini call. Returns a list of explanation strings in the same order as results.
+    """
+    schema = {
+        "type": "object",
+        "properties": {
+            "explanations": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+        "required": ["explanations"],
+    }
+
+    songs_block = "\n".join([
+        f"{i+1}. \"{r['title']}\" by {r['artist']} — snippet: {r['lyric_snippet'][:100]}"
+        for i, r in enumerate(results)
+    ])
+
+    content = (
+        f"User vibe: \"{prompt}\"\n"
+        f"Moods detected: {', '.join(moods)}\n\n"
+        f"Songs recommended:\n{songs_block}\n\n"
+        f"For each song, write exactly one sentence explaining why it matches "
+        f"the user's vibe. Be specific, reference the mood or lyric content. "
+        f"Do not start with 'This song' or 'I'. Keep each under 20 words. "
+        f"Return exactly {len(results)} explanations in the same order as the songs."
+    )
+
+    try:
+        response = _client.models.generate_content(
+            model=model,
+            contents=content,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.4,
+            ),
+        )
+        explanations = json.loads(response.text)["explanations"]
+
+        # Safety net — if Gemini returns wrong count, pad or trim
+        if len(explanations) < len(results):
+            explanations += [""] * (len(results) - len(explanations))
+        return explanations[:len(results)]
+
+    except Exception as e:
+        print(f"⚠️  Batch explanation generation failed: {e}")
+        return [""] * len(results)

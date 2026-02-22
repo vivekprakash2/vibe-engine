@@ -122,6 +122,7 @@ class SongResult(BaseModel):
     final_score:    float
     semantic_score: float
     enriched:       Optional[EnrichedQuery]
+    explanation:    Optional[str]
 
 
 # ---------------------------------------------------------------------------
