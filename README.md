@@ -49,7 +49,7 @@ This ensures that while a cover might have high lyrical similarity, the high-vie
 1.  Navigate to the `/vibe-backend` directory.
 2.  Install dependencies:
     ```bash
-    pip install fastapi uvicorn sentence-transformers google-generativeai pandas numpy
+    pip install requirements.txt
     ```
 3.  Set your API Key:
     ```bash
