@@ -49,7 +49,7 @@ This ensures that while a cover might have high lyrical similarity, the high-vie
 1.  Navigate to the `/vibe-backend` directory.
 2.  Install dependencies:
     ```bash
-    pip install requirements.txt
+    pip install -r requirements.txt
     ```
 3.  Set your API Key:
     ```bash
@@ -57,16 +57,17 @@ This ensures that while a cover might have high lyrical similarity, the high-vie
     ```
 4.  Run the server:
     ```bash
-    python main.py
+    uvicorn main:app --reload
     ```
 
 ### **Frontend Setup**
-1.  Navigate to the `/vibe-frontend` directory.
-2.  Install dependencies:
+1. Download Node.js: https://nodejs.org/en/download
+2.  Navigate to the `/vibe-frontend` directory.
+3.  Install dependencies:
     ```bash
     npm install
     ```
-3.  Run the development server:
+4.  Run the development server:
     ```bash
     npm run dev
     ```
