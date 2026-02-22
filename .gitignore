@@ -11,3 +11,4 @@ data/processed/
 artifacts/
 
 .DS_Store
+.cache
