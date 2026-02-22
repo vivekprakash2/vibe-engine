@@ -233,7 +233,7 @@ export default function App() {
                   </div>
 
                   {/* Score pills */}
-                  <div className="flex justify-center gap-4 text-[10px] font-mono text-gray-300 uppercase tracking-widest">
+                  <div className="flex justify-center gap-4 text-[10px] font-mono text-black-300 uppercase tracking-widest">
                     <span>Semantic Match {(current.semantic_score * 100).toFixed(0)}%</span>
                     <span>·</span>
                     <span>Final Score {(current.final_score * 100).toFixed(0)}%</span>
