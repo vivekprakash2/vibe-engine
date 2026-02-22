@@ -41,7 +41,6 @@ import re
 
 import numpy as np
 import pandas as pd
-import faiss
 import spotipy
 from dotenv import load_dotenv
 from spotipy.oauth2 import SpotifyClientCredentials
