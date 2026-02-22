@@ -21,7 +21,7 @@
 ### **Backend**
 * **Language:** Python 3.12
 * **API Framework:** FastAPI
-* **AI/ML Models:** * **Gemini 1.5 Flash:** Multimodal analysis and prompt enrichment.
+* **AI/ML Models:** * **Gemini 2.5 Flash:** Multimodal analysis and prompt enrichment.
     * **Sentence-Transformers (`all-MiniLM-L6-v2`):** Generating high-dimensional song embeddings.
     * **Scikit-Learn:** Optimized Cosine Similarity for vector retrieval.
 * **Data Science:** NumPy and Pandas for high-frequency tracking and metadata management.
