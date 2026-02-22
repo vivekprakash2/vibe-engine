@@ -103,7 +103,7 @@ export default function App() {
           What vibe are you <br/> feeling today?
         </h1>
         <p className="text-gray-500 mb-12 text-center text-lg">
-          Find the song you're feeling
+          Music discovery, reimagined
         </p>
 
         {/* INPUT BOX */}
