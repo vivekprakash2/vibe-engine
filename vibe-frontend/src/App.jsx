@@ -89,9 +89,9 @@ export default function App() {
       <nav className="p-6 flex justify-between items-center bg-transparent max-w-6xl mx-auto">
         <div className="flex items-center gap-2">
           <Sparkles className="text-orange-500" size={24}/>
-          <span className="text-xl font-semibold tracking-tight">VibeEngine</span>
+          <span className="text-2xl font-semibold tracking-tight">VibeEngine</span>
         </div>
-        <div className="text-[10px] text-gray-400 font-mono tracking-widest uppercase">
+        <div className="text-[14px] text-black-400 font-mono tracking-widest uppercase">
           GT Hacklytics 2026
         </div>
       </nav>
